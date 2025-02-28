@@ -1,13 +1,14 @@
 package br.com.gama.batch.conf;
 
 import br.com.gama.batch.models.DadosLeitura;
+import br.com.gama.batch.tasks.ApagaArquivosTasklet;
 import br.com.gama.batch.tasks.CopiaArquivosTasklet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
-import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.item.ItemReader;
@@ -40,6 +41,13 @@ public class JobConfig {
     @Value("${my.custom.pastadestino}")
     private String pastaDestino;
 
+    /**
+     * Primeiro Job. Executa extract (E), Transform (T) e load(L)
+     * @param repository
+     * @param step1
+     * @param step2
+     * @return
+     */
     @Bean
     public Job job(JobRepository repository, Step step1, Step step2){
         System.out.println("##### INICIANDO JOB #####");
@@ -47,11 +55,12 @@ public class JobConfig {
         return new JobBuilder("ETL", repository)
                 .start(step1)
                 .next(step2)
+                .incrementer(new RunIdIncrementer())
                 .build();
     }
 
     /**
-     * Primeiro Step do Job.
+     * Primeiro Step do primeiro Job.
      * Procura os arquivos que estão na pasta exterior à aplicação, 'csvs' (aonde os loggers gravam seus arquivos),
      * e os copia para pasta interna 'staging', para posterior tratamento.
      * @param repository
@@ -63,7 +72,6 @@ public class JobConfig {
         logger.info("Primeiro step do job - copiando arquivos originais de {}, para {}", pastaFonte,pastaDestino );
 
         CopiaArquivosTasklet task = new CopiaArquivosTasklet(this.pastaFonte, this.pastaDestino);
-
 
         return new StepBuilder("extract", repository)
                 .tasklet(task, transactionManager)
@@ -80,12 +88,12 @@ public class JobConfig {
      */
     @Bean
     public ItemReader<DadosLeitura> itemReader() throws IOException{
-        //Para ler múltiplos arquivos de uma pasta
 
+        //Para ler múltiplos arquivos de uma pasta
         PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
         String localizacao = "file:"+pastaDestino+"/*.csv";
         Resource[] resources=resolver.getResources(localizacao);
-        logger.info("numero de arqiuivos em resources"+resources.length);
+        logger.info("numero de arquivos em resources: "+resources.length);
 
         MultiResourceItemReader<DadosLeitura> multiResourceItemReader=new MultiResourceItemReader<>();
         multiResourceItemReader.setResources(resources);
@@ -127,7 +135,8 @@ public class JobConfig {
     }
 
     /**
-     * Segundo Step do job. Lê os arquivos do doretório 'staging', trata os registros e os carrega
+     * Segundo Step do primeiro job. Lê os arquivos do diretório 'staging', trata os
+     * registros e os carrega
      * na tabela 'leitura' do banco de dados.
      * @param jobRepository
      * @param transactionManager
@@ -146,6 +155,50 @@ public class JobConfig {
                 .<DadosLeitura, DadosLeitura>chunk(100, transactionManager)
                 .reader(itemReader)
                 .writer(itemWriter)
+                .build();
+    }
+
+    @Bean
+    public Job limpaJob(JobRepository jobRepository, Step apagaArquivosInternos, Step apagaArquivosExternos){
+        return new JobBuilder("limpa_job", jobRepository)
+                .start(apagaArquivosInternos)
+                .next(apagaArquivosExternos)
+                .incrementer(new RunIdIncrementer())
+                .build();
+    }
+
+    /**
+     * Primeiro step do segundo Job. Apaga os arquivos da pasta interna (staging)
+     * da aplicacao
+     * @param jobRepository
+     * @param transactionManager
+     * @return
+     */
+    @Bean
+    public Step apagaArquivosInternos(JobRepository jobRepository, JdbcTransactionManager transactionManager){
+        ApagaArquivosTasklet task = new ApagaArquivosTasklet(this.pastaDestino);
+
+        logger.info("Arquivos da pasta {} foram apagados", this.pastaDestino);
+
+        return new StepBuilder("apaga_arquivos_internos", jobRepository)
+                .tasklet(task, transactionManager)
+                .build();
+
+    }
+
+    /**
+     * Segundo step do Job. Apaga arquivos da pasta interna (csvs) da aplicacao.
+     * @param jobRepository
+     * @param transactionManager
+     * @return
+     */
+    @Bean
+    public Step apagaArquivosExternos(JobRepository jobRepository, JdbcTransactionManager transactionManager){
+        ApagaArquivosTasklet task =new ApagaArquivosTasklet(this.pastaFonte);
+        logger.info("Arquivos da pasta {} foram apagados", this.pastaFonte);
+
+        return new StepBuilder("apaga_arquivos_externos", jobRepository)
+                .tasklet(task, transactionManager)
                 .build();
     }
 
